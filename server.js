@@ -69,7 +69,7 @@ function nowMs() {
 function getIp(req) {
   const xf = req.headers["x-forwarded-for"];
   if (xf) return String(xf).split(",")[0].trim();
-  return (req.socket && req.socket.remoteAddress) ? String(req.socket.remoteAddress) : "";
+  return req.socket && req.socket.remoteAddress ? String(req.socket.remoteAddress) : "";
 }
 
 function rlKey(scope, a, b) {
@@ -155,12 +155,19 @@ function verifyWebToken(token) {
 
 function requireTokenForUser(req, res, usernameLower) {
   if (!WEB_TOKEN_SECRET) return { ok: true, username: usernameLower };
+
   const headerToken = req.headers["x-radio-token"];
   const qToken = req.query && typeof req.query.token === "string" ? req.query.token : null;
   const bodyToken = req.body && typeof req.body.token === "string" ? req.body.token : null;
+
   const t =
-    (typeof headerToken === "string" && headerToken) ? headerToken :
-    (qToken ? qToken : (bodyToken ? bodyToken : null));
+    typeof headerToken === "string" && headerToken
+      ? headerToken
+      : qToken
+      ? qToken
+      : bodyToken
+      ? bodyToken
+      : null;
 
   const v = verifyWebToken(t);
   if (!v.ok) {
@@ -188,7 +195,9 @@ function sseSendToUser(username, eventName, dataObj) {
 
   const payload = `event: ${eventName}\n` + `data: ${JSON.stringify(dataObj)}\n\n`;
   for (const res of set) {
-    try { res.write(payload); } catch (_) {}
+    try {
+      res.write(payload);
+    } catch {}
   }
   return true;
 }
@@ -198,13 +207,17 @@ function sseAddClient(username, res, ip) {
 
   const ipCount = sseIpCount.get(ip) || 0;
   if (ipCount >= MAX_SSE_PER_IP) {
-    try { res.status(429).end(); } catch {}
+    try {
+      res.status(429).end();
+    } catch {}
     return false;
   }
 
   const set = sseClients.get(key) || new Set();
   if (set.size >= MAX_SSE_PER_USER) {
-    try { res.status(429).end(); } catch {}
+    try {
+      res.status(429).end();
+    } catch {}
     return false;
   }
 
@@ -241,7 +254,7 @@ function cleanupSessions() {
 function cleanupRadioQueue() {
   const t = nowMs();
   for (const key of Object.keys(radioQueue)) {
-    radioQueue[key] = (radioQueue[key] || []).filter((ev) => (t - (ev.ts || t)) < RADIO_TTL_MS);
+    radioQueue[key] = (radioQueue[key] || []).filter((ev) => t - (ev.ts || t) < RADIO_TTL_MS);
     if (radioQueue[key].length === 0) delete radioQueue[key];
   }
 }
@@ -249,7 +262,7 @@ function cleanupRadioQueue() {
 function cleanupRadioState() {
   const t = nowMs();
   for (const key of Object.keys(radioState)) {
-    if ((t - (radioState[key].updatedAt || 0)) > STATE_TTL_MS) delete radioState[key];
+    if (t - (radioState[key].updatedAt || 0) > STATE_TTL_MS) delete radioState[key];
   }
 }
 
@@ -257,7 +270,7 @@ function cleanupTokenRevocations() {
   const t = nowMs();
   const ttl = Math.max(WEB_TOKEN_TTL_MS, 10 * 60 * 1000);
   for (const key of Object.keys(tokenRevokedAt)) {
-    if ((t - (tokenRevokedAt[key] || 0)) > ttl) delete tokenRevokedAt[key];
+    if (t - (tokenRevokedAt[key] || 0) > ttl) delete tokenRevokedAt[key];
   }
 }
 
@@ -285,6 +298,7 @@ app.get("/", (req, res) => {
 
 app.post("/presence", (req, res) => {
   if (rateLimit("presenceIp", req, res)) return;
+
   const { username, inGame, havePass } = req.body;
 
   if (!username || typeof inGame !== "boolean") {
@@ -298,6 +312,7 @@ app.post("/presence", (req, res) => {
 
 app.get("/presence/:username", (req, res) => {
   if (rateLimit("presenceIp", req, res)) return;
+
   const key = (req.params.username || "").toLowerCase();
   const exists = Object.prototype.hasOwnProperty.call(presence, key);
 
@@ -336,7 +351,10 @@ app.post("/session/create", (req, res) => {
   let code;
   for (let i = 0; i < 12; i++) {
     const c = genCode(7);
-    if (!sessions[c]) { code = c; break; }
+    if (!sessions[c]) {
+      code = c;
+      break;
+    }
   }
   if (!code) return res.status(500).json({ ok: false, error: "code_generation_failed" });
 
@@ -374,7 +392,7 @@ app.post("/session/verify", (req, res) => {
     username: sess.username,
     havePass: !!sess.havePass,
     token: token || null,
-    tokenExp: token ? (nowMs() + WEB_TOKEN_TTL_MS) : null
+    tokenExp: token ? nowMs() + WEB_TOKEN_TTL_MS : null,
   });
 });
 
@@ -400,7 +418,9 @@ app.get("/events/:username", (req, res) => {
   if (!added) return;
 
   const hb = setInterval(() => {
-    try { res.write(`event: ping\ndata: {}\n\n`); } catch (_) {}
+    try {
+      res.write(`event: ping\ndata: {}\n\n`);
+    } catch {}
   }, 20_000);
 
   res.on("close", () => clearInterval(hb));
@@ -424,7 +444,7 @@ app.post("/radio/join", (req, res) => {
 
   const t = nowMs();
   const last = radioQueue[key].length ? radioQueue[key][radioQueue[key].length - 1] : null;
-  if (last && last.type === "RADIO_JOIN" && (t - (last.ts || 0)) < 10_000) {
+  if (last && last.type === "RADIO_JOIN" && t - (last.ts || 0) < 10_000) {
     return res.json({ ok: true, ignored: true });
   }
 
@@ -443,6 +463,38 @@ app.post("/radio/mute", (req, res) => {
   const key = String(username).toLowerCase();
   const v = requireTokenForUser(req, res, key);
   if (!v) return;
+
+  if (!presence[key] || !presence[key].inGame) {
+    return res.status(403).json({ ok: false, error: "not_in_game" });
+  }
+
+  if (!radioQueue[key]) radioQueue[key] = [];
+  const last = radioQueue[key][radioQueue[key].length - 1];
+  if (last && typeof last.muted === "boolean" && last.muted === muted && nowMs() - last.ts < 1500) {
+    return res.json({ ok: true, ignored: true });
+  }
+
+  const ev = { type: muted ? "RADIO_MUTE" : "RADIO_UNMUTE", target: "web", muted, ts: nowMs() };
+  const pushed = sseSendToUser(key, "radio", ev);
+  radioQueue[key].push(ev);
+
+  res.json({ ok: true, pushed });
+});
+
+app.post("/radio/mute/server", (req, res) => {
+  if (rateLimit("muteIp", req, res)) return;
+
+  const serverKey = req.headers["x-roblox-key"];
+  if (!ROBLOX_SERVER_KEY || serverKey !== ROBLOX_SERVER_KEY) {
+    return res.status(401).json({ ok: false, error: "unauthorized" });
+  }
+
+  const { username, muted } = req.body || {};
+  if (!username || typeof muted !== "boolean") {
+    return res.status(400).json({ ok: false, error: "username e muted(boolean) obrigatórios" });
+  }
+
+  const key = String(username).toLowerCase();
 
   if (!presence[key] || !presence[key].inGame) {
     return res.status(403).json({ ok: false, error: "not_in_game" });
@@ -510,7 +562,7 @@ app.post("/radio/state", (req, res) => {
 
   const t = nowMs();
   const prev = radioState[key];
-  if (prev && prev.updatedAt && (t - prev.updatedAt) < STATE_MIN_GAP_MS) {
+  if (prev && prev.updatedAt && t - prev.updatedAt < STATE_MIN_GAP_MS) {
     return res.json({ ok: true, ignored: true });
   }
 
@@ -518,8 +570,8 @@ app.post("/radio/state", (req, res) => {
   const safePos = Number.isFinite(pos) && pos >= 0 ? pos : 0;
 
   radioState[key] = {
-    trackIndex: Number.isFinite(Number(trackIndex)) ? Number(trackIndex) : (prev?.trackIndex ?? 0),
-    trackName: typeof trackName === "string" ? trackName : (prev?.trackName ?? ""),
+    trackIndex: Number.isFinite(Number(trackIndex)) ? Number(trackIndex) : prev?.trackIndex ?? 0,
+    trackName: typeof trackName === "string" ? trackName : prev?.trackName ?? "",
     positionAt: safePos,
     isPlaying: !!isPlaying,
     muted: !!muted,
@@ -543,7 +595,7 @@ app.get("/radio/active", (req, res) => {
     if (!presence[key] || !presence[key].inGame) continue;
 
     const elapsed = (t - (st.serverTs || t)) / 1000;
-    const livePos = st.isPlaying ? (st.positionAt + Math.max(0, elapsed)) : st.positionAt;
+    const livePos = st.isPlaying ? st.positionAt + Math.max(0, elapsed) : st.positionAt;
 
     out.push({
       username: key,
