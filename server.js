@@ -5,17 +5,16 @@ const app = express();
 app.use(express.json());
 app.use(cors());
 
-// "Estado" em memória, só enquanto o servidor está ligado
-// Exemplo: { "almina": true, "andre": false }
 const presence = {};
 
+const radioQueue = {};
+
 app.get("/", (req, res) => {
-  res.send("Roblox Presence API 💜");
+  res.send("Roblox Presence API v1");
 });
 
-// Roblox chama isto quando o jogador entra/sai do jogo
 app.post("/presence", (req, res) => {
-  const { username, inGame } = req.body;
+  const { username, inGame, havePass } = req.body;
 
   if (!username || typeof inGame !== "boolean") {
     return res.status(400).json({
@@ -24,19 +23,51 @@ app.post("/presence", (req, res) => {
   }
 
   const key = username.toLowerCase();
-  presence[key] = inGame;
+  presence[key] = {
+    inGame,
+    havePass: !!havePass,
+    updatedAt: Date.now()
+  };
 
-  console.log(`Atualizado: ${username} -> ${inGame}`);
+  console.log(`Atualizado: ${username} -> ${inGame} (havePass=${!!havePass})`);
   res.json({ ok: true });
 });
 
-// O site pergunta aqui se o jogador está no jogo
 app.get("/presence/:username", (req, res) => {
   const key = (req.params.username || "").toLowerCase();
   const exists = Object.prototype.hasOwnProperty.call(presence, key);
-  const inGame = exists ? presence[key] : false;
 
-  res.json({ exists, inGame });
+  res.json({
+    exists,
+    inGame: exists ? presence[key].inGame : false,
+    havePass: exists ? presence[key].havePass : false
+  });
+});
+
+app.post("/radio/join", (req, res) => {
+  const { username } = req.body || {};
+  if (!username) {
+    return res.status(400).json({ ok: false, error: "username obrigatório" });
+  }
+
+  const key = username.toLowerCase();
+  if (!radioQueue[key]) radioQueue[key] = [];
+
+  radioQueue[key].push({
+    type: "RADIO_JOIN",
+    msg: "✅ Rádio sincronizada. Bem-vindo à sessão.",
+    ts: Date.now()
+  });
+
+  console.log(`RADIO_JOIN -> ${username}`);
+  res.json({ ok: true });
+});
+
+app.get("/radio/poll/:username", (req, res) => {
+  const key = (req.params.username || "").toLowerCase();
+  const events = radioQueue[key] || [];
+  radioQueue[key] = [];
+  res.json({ ok: true, events });
 });
 
 const PORT = process.env.PORT || 3000;
