@@ -8,7 +8,7 @@ app.use(cors());
 const presence = {};
 const radioQueue = {};
 
-const RADIO_TTL_MS = 5 * 60 * 1000; 
+const RADIO_TTL_MS = 5 * 60 * 1000;
 
 setInterval(() => {
   const now = Date.now();
@@ -20,8 +20,63 @@ setInterval(() => {
   }
 }, 60 * 1000);
 
+
+const sessions = {};           
+const sessionsByUser = {};        
+const SESSION_TTL_MS = 2 * 60 * 1000; 
+
+const ROBLOX_SERVER_KEY = process.env.ROBLOX_SERVER_KEY;
+
+
+const verifyHits = {}; 
+const VERIFY_WINDOW_MS = 15 * 1000; 
+const VERIFY_MAX = 12;             
+
+function genCode(len = 7) {
+  const chars = "ABCDEFGHJKLMNPQRSTUVWXYZ23456789"; 
+  let out = "";
+  for (let i = 0; i < len; i++) out += chars[Math.floor(Math.random() * chars.length)];
+  return out;
+}
+
+function cleanupSessions() {
+  const now = Date.now();
+  for (const code of Object.keys(sessions)) {
+    if (!sessions[code] || sessions[code].exp <= now) {
+      const u = sessions[code]?.username;
+      delete sessions[code];
+      if (u && sessionsByUser[u] === code) delete sessionsByUser[u];
+    }
+  }
+}
+
+function rateLimitVerify(req, res) {
+  const ip = (req.headers["x-forwarded-for"] || req.socket.remoteAddress || "")
+    .toString()
+    .split(",")[0]
+    .trim();
+
+  const now = Date.now();
+  let entry = verifyHits[ip];
+
+  if (!entry || entry.resetAt <= now) {
+    entry = verifyHits[ip] = { count: 0, resetAt: now + VERIFY_WINDOW_MS };
+  }
+
+  entry.count++;
+  if (entry.count > VERIFY_MAX) {
+    res.status(429).json({ ok: false, error: "rate_limited" });
+    return true;
+  }
+  return false;
+}
+
+setInterval(() => {
+  cleanupSessions();
+}, 30 * 1000);
+
 app.get("/", (req, res) => {
-  res.send("Roblox Presence API v3");
+  res.send("Roblox Presence API v3 + sessions");
 });
 
 app.post("/presence", (req, res) => {
@@ -53,6 +108,72 @@ app.get("/presence/:username", (req, res) => {
     inGame: exists ? !!presence[key].inGame : false,
     havePass: exists ? !!presence[key].havePass : false,
   });
+});
+
+app.post("/session/create", (req, res) => {
+  const serverKey = req.headers["x-roblox-key"];
+  if (!ROBLOX_SERVER_KEY || serverKey !== ROBLOX_SERVER_KEY) {
+    return res.status(401).json({ ok: false, error: "unauthorized" });
+  }
+
+  const { username, havePass } = req.body || {};
+  if (!username) return res.status(400).json({ ok: false, error: "username obrigatório" });
+
+  cleanupSessions();
+
+  const uname = username.toLowerCase();
+
+  if (!presence[uname] || !presence[uname].inGame) {
+    return res.status(403).json({ ok: false, error: "not_in_game" });
+  }
+
+  const prev = sessionsByUser[uname];
+  if (prev && sessions[prev]) {
+    delete sessions[prev];
+  }
+  delete sessionsByUser[uname];
+
+  let code;
+  for (let i = 0; i < 8; i++) {
+    const c = genCode(7);
+    if (!sessions[c]) { code = c; break; }
+  }
+  if (!code) return res.status(500).json({ ok: false, error: "code_generation_failed" });
+
+  sessions[code] = {
+    username: uname,
+    havePass: !!havePass,
+    exp: Date.now() + SESSION_TTL_MS
+  };
+  sessionsByUser[uname] = code;
+
+  console.log(`Session criada para ${username}: ${code} (pass=${!!havePass})`);
+  res.json({ ok: true, code, exp: sessions[code].exp });
+});
+
+app.post("/session/verify", (req, res) => {
+  if (rateLimitVerify(req, res)) return;
+
+  const { code } = req.body || {};
+  if (!code) return res.status(400).json({ ok: false, error: "code obrigatório" });
+
+  cleanupSessions();
+
+  const key = String(code).trim().toUpperCase();
+  const sess = sessions[key];
+  if (!sess) return res.json({ ok: false, error: "invalid_or_expired" });
+
+  if (!presence[sess.username] || !presence[sess.username].inGame) {
+    delete sessions[key];
+    if (sessionsByUser[sess.username] === key) delete sessionsByUser[sess.username];
+    return res.json({ ok: false, error: "not_in_game" });
+  }
+
+  // uso único
+  delete sessions[key];
+  if (sessionsByUser[sess.username] === key) delete sessionsByUser[sess.username];
+
+  res.json({ ok: true, username: sess.username, havePass: !!sess.havePass });
 });
 
 app.post("/radio/join", (req, res) => {
@@ -97,6 +218,3 @@ const PORT = process.env.PORT || 3000;
 app.listen(PORT, () => {
   console.log("🚀 Presence API a correr na porta " + PORT);
 });
-
-
-
