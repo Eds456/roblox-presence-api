@@ -11,6 +11,7 @@ const sessions = {};
 const sessionsByUser = {};
 const radioQueue = {};
 const radioState = {};
+const tokenRevokedAt = {};
 
 const SESSION_TTL_MS = 2 * 60 * 1000;
 const RADIO_TTL_MS = 5 * 60 * 1000;
@@ -48,9 +49,7 @@ function cleanupSessions() {
 function cleanupRadioQueue() {
   const now = Date.now();
   for (const key of Object.keys(radioQueue)) {
-    radioQueue[key] = (radioQueue[key] || []).filter(
-      (ev) => (now - (ev.ts || now)) < RADIO_TTL_MS
-    );
+    radioQueue[key] = (radioQueue[key] || []).filter((ev) => (now - (ev.ts || now)) < RADIO_TTL_MS);
     if (radioQueue[key].length === 0) delete radioQueue[key];
   }
 }
@@ -61,6 +60,14 @@ function cleanupRadioState() {
     if ((now - (radioState[key].updatedAt || 0)) > STATE_TTL_MS) {
       delete radioState[key];
     }
+  }
+}
+
+function cleanupTokenRevocations() {
+  const now = Date.now();
+  const ttl = Math.max(WEB_TOKEN_TTL_MS, 10 * 60 * 1000);
+  for (const key of Object.keys(tokenRevokedAt)) {
+    if ((now - (tokenRevokedAt[key] || 0)) > ttl) delete tokenRevokedAt[key];
   }
 }
 
@@ -135,7 +142,11 @@ function verifyWebToken(token) {
   if (!payloadObj || !payloadObj.u || !payloadObj.exp) return { ok: false, error: "bad_payload" };
   if (payloadObj.exp <= now) return { ok: false, error: "token_expired" };
 
-  return { ok: true, username: String(payloadObj.u).toLowerCase(), exp: payloadObj.exp };
+  const uname = String(payloadObj.u).toLowerCase();
+  const revokedAt = tokenRevokedAt[uname] || 0;
+  if (payloadObj.iat && payloadObj.iat < revokedAt) return { ok: false, error: "token_revoked" };
+
+  return { ok: true, username: uname, exp: payloadObj.exp };
 }
 
 const sseClients = new Map();
@@ -145,12 +156,12 @@ function sseSendToUser(username, eventName, dataObj) {
   const set = sseClients.get(key);
   if (!set || set.size === 0) return false;
 
-  const payload =
-    `event: ${eventName}\n` +
-    `data: ${JSON.stringify(dataObj)}\n\n`;
+  const payload = `event: ${eventName}\n` + `data: ${JSON.stringify(dataObj)}\n\n`;
 
   for (const res of set) {
-    try { res.write(payload); } catch (_) {}
+    try {
+      res.write(payload);
+    } catch (_) {}
   }
   return true;
 }
@@ -172,6 +183,7 @@ function sseAddClient(username, res) {
 setInterval(cleanupSessions, 30 * 1000);
 setInterval(cleanupRadioQueue, 60 * 1000);
 setInterval(cleanupRadioState, 5 * 1000);
+setInterval(cleanupTokenRevocations, 60 * 1000);
 
 app.get("/", (req, res) => {
   res.send("Roblox Presence API v5");
@@ -224,10 +236,17 @@ app.post("/session/create", (req, res) => {
   if (prev && sessions[prev]) delete sessions[prev];
   delete sessionsByUser[uname];
 
+  tokenRevokedAt[uname] = Date.now();
+  delete radioState[uname];
+  sseSendToUser(uname, "radio", { type: "KICK", reason: "new_code", ts: Date.now() });
+
   let code;
   for (let i = 0; i < 12; i++) {
     const c = genCode(7);
-    if (!sessions[c]) { code = c; break; }
+    if (!sessions[c]) {
+      code = c;
+      break;
+    }
   }
   if (!code) return res.status(500).json({ ok: false, error: "code_generation_failed" });
 
@@ -264,7 +283,7 @@ app.post("/session/verify", (req, res) => {
     username: sess.username,
     havePass: !!sess.havePass,
     token: token || null,
-    tokenExp: token ? (Date.now() + WEB_TOKEN_TTL_MS) : null
+    tokenExp: token ? Date.now() + WEB_TOKEN_TTL_MS : null,
   });
 });
 
@@ -320,7 +339,9 @@ app.get("/events/:username", (req, res) => {
   sseAddClient(username, res);
 
   const hb = setInterval(() => {
-    try { res.write(`event: ping\ndata: {}\n\n`); } catch (_) {}
+    try {
+      res.write(`event: ping\ndata: {}\n\n`);
+    } catch (_) {}
   }, 20_000);
 
   res.on("close", () => clearInterval(hb));
@@ -329,9 +350,9 @@ app.get("/events/:username", (req, res) => {
 app.get("/radio/sync/:username", (req, res) => {
   const key = (req.params.username || "").toLowerCase();
   const events = radioQueue[key] || [];
-  const webEvents = events.filter(e => e.target === "web");
+  const webEvents = events.filter((e) => e.target === "web");
 
-  radioQueue[key] = events.filter(e => e.target !== "web");
+  radioQueue[key] = events.filter((e) => e.target !== "web");
   res.json({ ok: true, events: webEvents });
 });
 
@@ -339,8 +360,8 @@ app.get("/radio/poll/:username", (req, res) => {
   const key = (req.params.username || "").toLowerCase();
   const events = radioQueue[key] || [];
 
-  const robloxEvents = events.filter(e => !e.target || e.target === "roblox");
-  radioQueue[key] = events.filter(e => e.target && e.target !== "roblox");
+  const robloxEvents = events.filter((e) => !e.target || e.target === "roblox");
+  radioQueue[key] = events.filter((e) => e.target && e.target !== "roblox");
 
   res.json({ ok: true, events: robloxEvents });
 });
@@ -353,7 +374,7 @@ app.post("/radio/state", (req, res) => {
 
   if (WEB_TOKEN_SECRET) {
     const headerToken = req.headers["x-radio-token"];
-    const t = (typeof headerToken === "string" && headerToken) ? headerToken : token;
+    const t = typeof headerToken === "string" && headerToken ? headerToken : token;
     const v = verifyWebToken(t);
     if (!v.ok) return res.status(401).json({ ok: false, error: v.error });
     if (v.username !== key) return res.status(403).json({ ok: false, error: "token_user_mismatch" });
@@ -365,7 +386,7 @@ app.post("/radio/state", (req, res) => {
 
   const now = Date.now();
   const prev = radioState[key];
-  if (prev && prev.updatedAt && (now - prev.updatedAt) < STATE_MIN_GAP_MS) {
+  if (prev && prev.updatedAt && now - prev.updatedAt < STATE_MIN_GAP_MS) {
     return res.json({ ok: true, ignored: true });
   }
 
@@ -373,8 +394,8 @@ app.post("/radio/state", (req, res) => {
   const safePos = Number.isFinite(pos) && pos >= 0 ? pos : 0;
 
   radioState[key] = {
-    trackIndex: Number.isFinite(Number(trackIndex)) ? Number(trackIndex) : (prev?.trackIndex ?? 0),
-    trackName: typeof trackName === "string" ? trackName : (prev?.trackName ?? ""),
+    trackIndex: Number.isFinite(Number(trackIndex)) ? Number(trackIndex) : prev?.trackIndex ?? 0,
+    trackName: typeof trackName === "string" ? trackName : prev?.trackName ?? "",
     positionAt: safePos,
     isPlaying: !!isPlaying,
     muted: !!muted,
@@ -396,7 +417,7 @@ app.get("/radio/active", (req, res) => {
     if (!presence[key] || !presence[key].inGame) continue;
 
     const elapsed = (now - (st.serverTs || now)) / 1000;
-    const livePos = st.isPlaying ? (st.positionAt + Math.max(0, elapsed)) : st.positionAt;
+    const livePos = st.isPlaying ? st.positionAt + Math.max(0, elapsed) : st.positionAt;
 
     out.push({
       username: key,
