@@ -323,6 +323,29 @@ app.get("/presence/:username", (req, res) => {
     havePass: exists ? !!presence[key].havePass : false,
   });
 });
+app.get("/discord/presence/:username", (req, res) => {
+  const key = (req.params.username || "").toLowerCase();
+  if (!key) return res.status(400).json({ ok:false, error:"username obrigatório" });
+
+  const v = requireTokenForUser(req, res, key);
+  if (!v) return;
+
+  if (!presence[key] || !presence[key].inGame) {
+    return res.json({ ok: true, active: false });
+  }
+
+  const st = radioState[key];
+  if (!st) return res.json({ ok: true, active: false });
+
+  return res.json({
+    ok: true,
+    active: true,
+    trackName: st.trackName || "",
+    positionSec: Number(st.positionAt) || 0,
+    isPlaying: !!st.isPlaying,
+    muted: !!st.muted
+  });
+});
 
 app.post("/session/create", (req, res) => {
   const serverKey = req.headers["x-roblox-key"];
@@ -616,3 +639,4 @@ const PORT = process.env.PORT || 3000;
 app.listen(PORT, () => {
   console.log("🚀 Presence API v6-ultra a correr na porta " + PORT);
 });
+
