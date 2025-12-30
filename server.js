@@ -18,7 +18,7 @@ app.post("/presence", (req, res) => {
 
   if (!username || typeof inGame !== "boolean") {
     return res.status(400).json({
-      error: "username (string) e inGame (boolean) são obrigatórios"
+      error: "username (string) e inGame (boolean) são obrigatórios",
     });
   }
 
@@ -26,7 +26,7 @@ app.post("/presence", (req, res) => {
   presence[key] = {
     inGame,
     havePass: !!havePass,
-    updatedAt: Date.now()
+    updatedAt: Date.now(),
   };
 
   console.log(`Atualizado: ${username} -> ${inGame} (havePass=${!!havePass})`);
@@ -39,16 +39,14 @@ app.get("/presence/:username", (req, res) => {
 
   res.json({
     exists,
-    inGame: exists ? presence[key].inGame : false,
-    havePass: exists ? presence[key].havePass : false
+    inGame: exists ? !!presence[key].inGame : false,
+    havePass: exists ? !!presence[key].havePass : false,
   });
 });
 
 app.post("/radio/join", (req, res) => {
   const { username } = req.body || {};
-  if (!username) {
-    return res.status(400).json({ ok: false, error: "username obrigatório" });
-  }
+  if (!username) return res.status(400).json({ ok: false, error: "username obrigatório" });
 
   const key = username.toLowerCase();
   if (!radioQueue[key]) radioQueue[key] = [];
@@ -56,10 +54,10 @@ app.post("/radio/join", (req, res) => {
   radioQueue[key].push({
     type: "RADIO_JOIN",
     msg: "✅ Rádio sincronizada. Bem-vindo à sessão.",
-    ts: Date.now()
+    ts: Date.now(),
   });
 
-  console.log(`RADIO_JOIN -> ${username}`);
+  console.log(`Evento RADIO_JOIN registado para ${username}`);
   res.json({ ok: true });
 });
 
