@@ -10,7 +10,7 @@ const presence = {};
 const radioQueue = {};
 
 app.get("/", (req, res) => {
-  res.send("Roblox Presence API 💜");
+  res.send("Roblox Presence API v1");
 });
 
 app.post("/presence", (req, res) => {
@@ -61,7 +61,6 @@ app.post("/radio/join", (req, res) => {
   res.json({ ok: true });
 });
 
-// ROBLOX -> BACKEND: buscar eventos pendentes desse username
 app.get("/radio/poll/:username", (req, res) => {
   const key = (req.params.username || "").toLowerCase();
   const events = radioQueue[key] || [];
