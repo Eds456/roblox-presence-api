@@ -73,7 +73,6 @@ app.post("/radio/join", (req, res) => {
 
   radioQueue[key].push({
     type: "RADIO_JOIN",
-    msg: "✅ Rádio sincronizada. Bem-vindo à sessão.",
     ts: now,
   });
 
@@ -98,4 +97,5 @@ const PORT = process.env.PORT || 3000;
 app.listen(PORT, () => {
   console.log("🚀 Presence API a correr na porta " + PORT);
 });
+
 
