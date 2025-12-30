@@ -201,6 +201,36 @@ app.post("/radio/join", (req, res) => {
   res.json({ ok: true });
 });
 
+app.post("/radio/mute", (req, res) => {
+  const { username } = req.body || {};
+  if (!username) return res.status(400).json({ ok: false, error: "username obrigatório" });
+
+  const key = username.toLowerCase();
+  if (!radioQueue[key]) radioQueue[key] = [];
+
+  radioQueue[key].push({
+    type: "RADIO_MUTE",
+    ts: Date.now(),
+  });
+
+  res.json({ ok: true });
+});
+
+app.post("/radio/mute", (req, res) => {
+  const { username } = req.body || {};
+  if (!username) return res.status(400).json({ ok: false, error: "username obrigatório" });
+
+  const key = username.toLowerCase();
+  if (!radioQueue[key]) radioQueue[key] = [];
+
+  radioQueue[key].push({
+    type: "RADIO_MUTE",
+    ts: Date.now(),
+  });
+
+  res.json({ ok: true });
+});
+
 app.get("/radio/peek/:username", (req, res) => {
   const key = (req.params.username || "").toLowerCase();
   const events = radioQueue[key] || [];
@@ -218,3 +248,4 @@ const PORT = process.env.PORT || 3000;
 app.listen(PORT, () => {
   console.log("🚀 Presence API a correr na porta " + PORT);
 });
+
