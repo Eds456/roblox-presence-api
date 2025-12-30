@@ -7,22 +7,12 @@ app.use(cors());
 
 const presence = {};
 const radioQueue = {};
+const sessions = {};           
+const sessionsByUser = {};     
 
 const RADIO_TTL_MS = 5 * 60 * 1000;
-
-setInterval(() => {
-  const now = Date.now();
-  for (const key of Object.keys(radioQueue)) {
-    radioQueue[key] = (radioQueue[key] || []).filter(
-      (ev) => (now - (ev.ts || now)) < RADIO_TTL_MS
-    );
-    if (radioQueue[key].length === 0) delete radioQueue[key];
-  }
-}, 60 * 1000);
-
-const sessions = {};          
-const sessionsByUser = {};     
 const SESSION_TTL_MS = 2 * 60 * 1000;
+const PRESENCE_TTL_MS = 2 * 60 * 1000; 
 
 const ROBLOX_SERVER_KEY = process.env.ROBLOX_SERVER_KEY || "";
 
@@ -31,7 +21,7 @@ const VERIFY_WINDOW_MS = 15 * 1000;
 const VERIFY_MAX = 12;
 
 function genCode(len = 7) {
-  const chars = "ABCDEFGHJKLMNPQRSTUVWXYZ23456789";
+  const chars = "ABCDEFGHJKLMNPQRSTUVWXYZ23456789"; 
   let out = "";
   for (let i = 0; i < len; i++) out += chars[Math.floor(Math.random() * chars.length)];
   return out;
@@ -46,6 +36,16 @@ function cleanupSessions() {
       delete sessions[code];
       if (u && sessionsByUser[u] === code) delete sessionsByUser[u];
     }
+  }
+}
+
+function cleanupRadioQueue() {
+  const now = Date.now();
+  for (const key of Object.keys(radioQueue)) {
+    radioQueue[key] = (radioQueue[key] || []).filter(
+      (ev) => (now - (ev.ts || 0)) < RADIO_TTL_MS
+    );
+    if (radioQueue[key].length === 0) delete radioQueue[key];
   }
 }
 
@@ -71,6 +71,7 @@ function rateLimitVerify(req, res) {
 }
 
 setInterval(cleanupSessions, 30 * 1000);
+setInterval(cleanupRadioQueue, 60 * 1000);
 
 app.get("/", (req, res) => {
   res.send("Roblox Presence API v3 + sessions + radio");
@@ -81,6 +82,7 @@ app.post("/presence", (req, res) => {
 
   if (!username || typeof inGame !== "boolean") {
     return res.status(400).json({
+      ok: false,
       error: "username (string) e inGame (boolean) são obrigatórios",
     });
   }
@@ -92,18 +94,18 @@ app.post("/presence", (req, res) => {
     updatedAt: Date.now(),
   };
 
-  console.log(`Atualizado: ${username} -> ${inGame} (havePass=${!!havePass})`);
   res.json({ ok: true });
 });
 
 app.get("/presence/:username", (req, res) => {
   const key = (req.params.username || "").toLowerCase();
-  const exists = Object.prototype.hasOwnProperty.call(presence, key);
+  const p = presence[key];
+  const fresh = p && (Date.now() - (p.updatedAt || 0)) < PRESENCE_TTL_MS;
 
   res.json({
-    exists,
-    inGame: exists ? !!presence[key].inGame : false,
-    havePass: exists ? !!presence[key].havePass : false,
+    exists: !!p,
+    inGame: fresh ? !!p.inGame : false,
+    havePass: fresh ? !!p.havePass : false,
   });
 });
 
@@ -119,8 +121,10 @@ app.post("/session/create", (req, res) => {
   cleanupSessions();
 
   const uname = String(username).toLowerCase();
+  const p = presence[uname];
+  const fresh = p && (Date.now() - (p.updatedAt || 0)) < PRESENCE_TTL_MS;
 
-  if (!presence[uname] || !presence[uname].inGame) {
+  if (!fresh || !p.inGame) {
     return res.status(403).json({ ok: false, error: "not_in_game" });
   }
 
@@ -138,15 +142,13 @@ app.post("/session/create", (req, res) => {
   sessions[code] = {
     username: uname,
     havePass: !!havePass,
-    exp: Date.now() + SESSION_TTL_MS
+    exp: Date.now() + SESSION_TTL_MS,
   };
   sessionsByUser[uname] = code;
 
-  console.log(`Session criada para ${username}: ${code} (pass=${!!havePass})`);
   res.json({ ok: true, code, exp: sessions[code].exp });
 });
 
-// Verify session code (Website)
 app.post("/session/verify", (req, res) => {
   if (rateLimitVerify(req, res)) return;
 
@@ -159,7 +161,10 @@ app.post("/session/verify", (req, res) => {
   const sess = sessions[key];
   if (!sess) return res.json({ ok: false, error: "invalid_or_expired" });
 
-  if (!presence[sess.username] || !presence[sess.username].inGame) {
+  const p = presence[sess.username];
+  const fresh = p && (Date.now() - (p.updatedAt || 0)) < PRESENCE_TTL_MS;
+
+  if (!fresh || !p.inGame) {
     delete sessions[key];
     if (sessionsByUser[sess.username] === key) delete sessionsByUser[sess.username];
     return res.json({ ok: false, error: "not_in_game" });
@@ -186,8 +191,6 @@ app.post("/radio/join", (req, res) => {
   }
 
   radioQueue[key].push({ type: "RADIO_JOIN", target: "roblox", ts: now });
-
-  console.log(`Evento RADIO_JOIN registado para ${username}`);
   res.json({ ok: true });
 });
 
@@ -196,7 +199,7 @@ app.post("/radio/mute", (req, res) => {
   if (!username || typeof muted !== "boolean") {
     return res.status(400).json({
       ok: false,
-      error: "username e muted(boolean) obrigatórios"
+      error: "username e muted(boolean) obrigatórios",
     });
   }
 
@@ -204,7 +207,7 @@ app.post("/radio/mute", (req, res) => {
   if (!radioQueue[key]) radioQueue[key] = [];
 
   const last = radioQueue[key][radioQueue[key].length - 1];
-  if (last && last.muted === muted && Date.now() - last.ts < 1500) {
+  if (last && last.muted === muted && (Date.now() - (last.ts || 0)) < 1500) {
     return res.json({ ok: true, ignored: true });
   }
 
@@ -218,11 +221,9 @@ app.post("/radio/mute", (req, res) => {
   res.json({ ok: true });
 });
 
-
 app.get("/radio/peek/:username", (req, res) => {
   const key = (req.params.username || "").toLowerCase();
-  const events = radioQueue[key] || [];
-  res.json({ ok: true, events });
+  res.json({ ok: true, events: radioQueue[key] || [] });
 });
 
 app.get("/radio/poll/:username", (req, res) => {
@@ -249,4 +250,3 @@ const PORT = process.env.PORT || 3000;
 app.listen(PORT, () => {
   console.log("🚀 Presence API a correr na porta " + PORT);
 });
-
