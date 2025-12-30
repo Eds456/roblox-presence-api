@@ -6,26 +6,25 @@ const app = express();
 app.use(express.json());
 app.use(cors());
 
-const presence = {};          
-const sessions = {};          
-const sessionsByUser = {};  
-const radioQueue = {};        
-const radioState = {};        
+const presence = {};
+const sessions = {};
+const sessionsByUser = {};
+const radioQueue = {};
+const radioState = {};
 
 const SESSION_TTL_MS = 2 * 60 * 1000;
 const RADIO_TTL_MS = 5 * 60 * 1000;
 
-const STATE_TTL_MS = 25 * 1000;        
-const STATE_MIN_GAP_MS = 700;          
+const STATE_TTL_MS = 25 * 1000;
+const STATE_MIN_GAP_MS = 700;
 
 const verifyHits = {};
 const VERIFY_WINDOW_MS = 15 * 1000;
 const VERIFY_MAX = 12;
 
 const ROBLOX_SERVER_KEY = process.env.ROBLOX_SERVER_KEY || "";
-const WEB_TOKEN_SECRET = process.env.WEB_TOKEN_SECRET || ""; 
-
-const WEB_TOKEN_TTL_MS = 10 * 60 * 1000; 
+const WEB_TOKEN_SECRET = process.env.WEB_TOKEN_SECRET || "";
+const WEB_TOKEN_TTL_MS = 10 * 60 * 1000;
 
 function genCode(len = 7) {
   const chars = "ABCDEFGHJKLMNPQRSTUVWXYZ23456789";
@@ -90,6 +89,7 @@ function b64urlEncode(bufOrString) {
   const b = Buffer.isBuffer(bufOrString) ? bufOrString : Buffer.from(String(bufOrString));
   return b.toString("base64").replace(/=/g, "").replace(/\+/g, "-").replace(/\//g, "_");
 }
+
 function b64urlDecodeToString(str) {
   const s = String(str).replace(/-/g, "+").replace(/_/g, "/");
   const pad = s.length % 4 ? "=".repeat(4 - (s.length % 4)) : "";
@@ -100,16 +100,9 @@ function makeWebToken(usernameLower) {
   if (!WEB_TOKEN_SECRET) return null;
 
   const now = Date.now();
-  const payloadObj = {
-    u: usernameLower,
-    iat: now,
-    exp: now + WEB_TOKEN_TTL_MS,
-  };
+  const payloadObj = { u: usernameLower, iat: now, exp: now + WEB_TOKEN_TTL_MS };
   const payload = b64urlEncode(JSON.stringify(payloadObj));
-  const sig = crypto
-    .createHmac("sha256", WEB_TOKEN_SECRET)
-    .update(payload)
-    .digest();
+  const sig = crypto.createHmac("sha256", WEB_TOKEN_SECRET).update(payload).digest();
   return `${payload}.${b64urlEncode(sig)}`;
 }
 
@@ -122,15 +115,11 @@ function verifyWebToken(token) {
 
   const [payload, sigB64] = parts;
 
-  const expectedSig = crypto
-    .createHmac("sha256", WEB_TOKEN_SECRET)
-    .update(payload)
-    .digest();
+  const expectedSig = crypto.createHmac("sha256", WEB_TOKEN_SECRET).update(payload).digest();
 
-  const gotSig = Buffer.from(
-    String(sigB64).replace(/-/g, "+").replace(/_/g, "/") + "==".slice(0, (4 - (sigB64.length % 4)) % 4),
-    "base64"
-  );
+  const b64 = String(sigB64).replace(/-/g, "+").replace(/_/g, "/");
+  const padLen = (4 - (b64.length % 4)) % 4;
+  const gotSig = Buffer.from(b64 + "=".repeat(padLen), "base64");
 
   if (gotSig.length !== expectedSig.length) return { ok: false, error: "bad_signature" };
   if (!crypto.timingSafeEqual(gotSig, expectedSig)) return { ok: false, error: "bad_signature" };
@@ -185,7 +174,7 @@ setInterval(cleanupRadioQueue, 60 * 1000);
 setInterval(cleanupRadioState, 5 * 1000);
 
 app.get("/", (req, res) => {
-  res.send("Roblox Presence API v5 (sessions + radio + SSE + global state)");
+  res.send("Roblox Presence API v5");
 });
 
 app.post("/presence", (req, res) => {
@@ -199,12 +188,7 @@ app.post("/presence", (req, res) => {
   }
 
   const key = String(username).toLowerCase();
-  presence[key] = {
-    inGame,
-    havePass: !!havePass,
-    updatedAt: Date.now(),
-  };
-
+  presence[key] = { inGame, havePass: !!havePass, updatedAt: Date.now() };
   res.json({ ok: true });
 });
 
@@ -232,7 +216,6 @@ app.post("/session/create", (req, res) => {
   cleanupSessions();
 
   const uname = String(username).toLowerCase();
-
   if (!presence[uname] || !presence[uname].inGame) {
     return res.status(403).json({ ok: false, error: "not_in_game" });
   }
@@ -248,11 +231,7 @@ app.post("/session/create", (req, res) => {
   }
   if (!code) return res.status(500).json({ ok: false, error: "code_generation_failed" });
 
-  sessions[code] = {
-    username: uname,
-    havePass: !!havePass,
-    exp: Date.now() + SESSION_TTL_MS
-  };
+  sessions[code] = { username: uname, havePass: !!havePass, exp: Date.now() + SESSION_TTL_MS };
   sessionsByUser[uname] = code;
 
   res.json({ ok: true, code, exp: sessions[code].exp });
@@ -320,13 +299,7 @@ app.post("/radio/mute", (req, res) => {
     return res.json({ ok: true, ignored: true });
   }
 
-  const ev = {
-    type: muted ? "RADIO_MUTE" : "RADIO_UNMUTE",
-    target: "web",
-    muted,
-    ts: Date.now(),
-  };
-
+  const ev = { type: muted ? "RADIO_MUTE" : "RADIO_UNMUTE", target: "web", muted, ts: Date.now() };
   const pushed = sseSendToUser(key, "radio", ev);
   radioQueue[key].push(ev);
 
@@ -374,7 +347,6 @@ app.get("/radio/poll/:username", (req, res) => {
 
 app.post("/radio/state", (req, res) => {
   const { username, trackIndex, trackName, positionSec, isPlaying, muted, token } = req.body || {};
-
   if (!username) return res.status(400).json({ ok: false, error: "username obrigatório" });
 
   const key = String(username).toLowerCase();
@@ -414,12 +386,13 @@ app.post("/radio/state", (req, res) => {
 });
 
 app.get("/radio/active", (req, res) => {
+  res.setHeader("Cache-Control", "no-store");
+
   const now = Date.now();
   const out = [];
 
   for (const key of Object.keys(radioState)) {
     const st = radioState[key];
-
     if (!presence[key] || !presence[key].inGame) continue;
 
     const elapsed = (now - (st.serverTs || now)) / 1000;
