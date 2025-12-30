@@ -20,20 +20,18 @@ setInterval(() => {
   }
 }, 60 * 1000);
 
+const sessions = {};          
+const sessionsByUser = {};     
+const SESSION_TTL_MS = 2 * 60 * 1000;
 
-const sessions = {};           
-const sessionsByUser = {};        
-const SESSION_TTL_MS = 2 * 60 * 1000; 
+const ROBLOX_SERVER_KEY = process.env.ROBLOX_SERVER_KEY || "";
 
-const ROBLOX_SERVER_KEY = process.env.ROBLOX_SERVER_KEY;
-
-
-const verifyHits = {}; 
-const VERIFY_WINDOW_MS = 15 * 1000; 
-const VERIFY_MAX = 12;             
+const verifyHits = {};
+const VERIFY_WINDOW_MS = 15 * 1000;
+const VERIFY_MAX = 12;
 
 function genCode(len = 7) {
-  const chars = "ABCDEFGHJKLMNPQRSTUVWXYZ23456789"; 
+  const chars = "ABCDEFGHJKLMNPQRSTUVWXYZ23456789";
   let out = "";
   for (let i = 0; i < len; i++) out += chars[Math.floor(Math.random() * chars.length)];
   return out;
@@ -42,8 +40,9 @@ function genCode(len = 7) {
 function cleanupSessions() {
   const now = Date.now();
   for (const code of Object.keys(sessions)) {
-    if (!sessions[code] || sessions[code].exp <= now) {
-      const u = sessions[code]?.username;
+    const s = sessions[code];
+    if (!s || s.exp <= now) {
+      const u = s?.username;
       delete sessions[code];
       if (u && sessionsByUser[u] === code) delete sessionsByUser[u];
     }
@@ -71,12 +70,10 @@ function rateLimitVerify(req, res) {
   return false;
 }
 
-setInterval(() => {
-  cleanupSessions();
-}, 30 * 1000);
+setInterval(cleanupSessions, 30 * 1000);
 
 app.get("/", (req, res) => {
-  res.send("Roblox Presence API v3 + sessions");
+  res.send("Roblox Presence API v3 + sessions + radio");
 });
 
 app.post("/presence", (req, res) => {
@@ -88,7 +85,7 @@ app.post("/presence", (req, res) => {
     });
   }
 
-  const key = username.toLowerCase();
+  const key = String(username).toLowerCase();
   presence[key] = {
     inGame,
     havePass: !!havePass,
@@ -121,20 +118,18 @@ app.post("/session/create", (req, res) => {
 
   cleanupSessions();
 
-  const uname = username.toLowerCase();
+  const uname = String(username).toLowerCase();
 
   if (!presence[uname] || !presence[uname].inGame) {
     return res.status(403).json({ ok: false, error: "not_in_game" });
   }
 
   const prev = sessionsByUser[uname];
-  if (prev && sessions[prev]) {
-    delete sessions[prev];
-  }
+  if (prev && sessions[prev]) delete sessions[prev];
   delete sessionsByUser[uname];
 
   let code;
-  for (let i = 0; i < 8; i++) {
+  for (let i = 0; i < 12; i++) {
     const c = genCode(7);
     if (!sessions[c]) { code = c; break; }
   }
@@ -151,6 +146,7 @@ app.post("/session/create", (req, res) => {
   res.json({ ok: true, code, exp: sessions[code].exp });
 });
 
+// Verify session code (Website)
 app.post("/session/verify", (req, res) => {
   if (rateLimitVerify(req, res)) return;
 
@@ -169,7 +165,6 @@ app.post("/session/verify", (req, res) => {
     return res.json({ ok: false, error: "not_in_game" });
   }
 
-  // uso único
   delete sessions[key];
   if (sessionsByUser[sess.username] === key) delete sessionsByUser[sess.username];
 
@@ -178,24 +173,19 @@ app.post("/session/verify", (req, res) => {
 
 app.post("/radio/join", (req, res) => {
   const { username } = req.body || {};
-  if (!username) {
-    return res.status(400).json({ ok: false, error: "username obrigatório" });
-  }
+  if (!username) return res.status(400).json({ ok: false, error: "username obrigatório" });
 
-  const key = username.toLowerCase();
+  const key = String(username).toLowerCase();
   if (!radioQueue[key]) radioQueue[key] = [];
 
   const now = Date.now();
-
   const last = radioQueue[key].length ? radioQueue[key][radioQueue[key].length - 1] : null;
+
   if (last && last.type === "RADIO_JOIN" && (now - (last.ts || 0)) < 10_000) {
     return res.json({ ok: true, ignored: true });
   }
 
-  radioQueue[key].push({
-    type: "RADIO_JOIN",
-    ts: now,
-  });
+  radioQueue[key].push({ type: "RADIO_JOIN", target: "roblox", ts: now });
 
   console.log(`Evento RADIO_JOIN registado para ${username}`);
   res.json({ ok: true });
@@ -205,26 +195,12 @@ app.post("/radio/mute", (req, res) => {
   const { username } = req.body || {};
   if (!username) return res.status(400).json({ ok: false, error: "username obrigatório" });
 
-  const key = username.toLowerCase();
+  const key = String(username).toLowerCase();
   if (!radioQueue[key]) radioQueue[key] = [];
 
   radioQueue[key].push({
     type: "RADIO_MUTE",
-    ts: Date.now(),
-  });
-
-  res.json({ ok: true });
-});
-
-app.post("/radio/mute", (req, res) => {
-  const { username } = req.body || {};
-  if (!username) return res.status(400).json({ ok: false, error: "username obrigatório" });
-
-  const key = username.toLowerCase();
-  if (!radioQueue[key]) radioQueue[key] = [];
-
-  radioQueue[key].push({
-    type: "RADIO_MUTE",
+    target: "web",
     ts: Date.now(),
   });
 
@@ -240,12 +216,24 @@ app.get("/radio/peek/:username", (req, res) => {
 app.get("/radio/poll/:username", (req, res) => {
   const key = (req.params.username || "").toLowerCase();
   const events = radioQueue[key] || [];
-  radioQueue[key] = [];
-  res.json({ ok: true, events });
+
+  const robloxEvents = events.filter(e => !e.target || e.target === "roblox");
+  radioQueue[key] = events.filter(e => e.target && e.target !== "roblox");
+
+  res.json({ ok: true, events: robloxEvents });
+});
+
+app.get("/radio/poll_web/:username", (req, res) => {
+  const key = (req.params.username || "").toLowerCase();
+  const events = radioQueue[key] || [];
+
+  const webEvents = events.filter(e => e.target === "web");
+  radioQueue[key] = events.filter(e => e.target !== "web");
+
+  res.json({ ok: true, events: webEvents });
 });
 
 const PORT = process.env.PORT || 3000;
 app.listen(PORT, () => {
   console.log("🚀 Presence API a correr na porta " + PORT);
 });
-
