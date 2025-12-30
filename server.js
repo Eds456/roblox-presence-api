@@ -21,7 +21,7 @@ setInterval(() => {
 }, 60 * 1000);
 
 app.get("/", (req, res) => {
-  res.send("Roblox Presence API v2");
+  res.send("Roblox Presence API v3");
 });
 
 app.post("/presence", (req, res) => {
@@ -97,5 +97,6 @@ const PORT = process.env.PORT || 3000;
 app.listen(PORT, () => {
   console.log("🚀 Presence API a correr na porta " + PORT);
 });
+
 
 
